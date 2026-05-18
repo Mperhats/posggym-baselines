@@ -411,9 +411,11 @@ class PlanningExpParams:
     ):
         if report_mem_usage:
             process = psutil.Process(os.getpid())
-            rss = process.memory_info().rss / 1024**2
-            vrt = process.memory_info().vms / 1024**2
-            shr = process.memory_info().shared / 1024**2
+            mem = process.memory_info()
+            rss = mem.rss / 1024**2
+            vrt = mem.vms / 1024**2
+            # `shared` is Linux-only on psutil; macOS pmem has no .shared.
+            shr = getattr(mem, "shared", 0) / 1024**2
             log = f"(MEM={vrt:.0f}/{rss:.0f}/{shr:.0f}MB VIRT/RSS/SHR) {log}"
 
         if add_timestamp:
