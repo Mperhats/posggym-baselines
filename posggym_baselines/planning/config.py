@@ -1,6 +1,6 @@
 import math
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, Tuple
 
 from posggym_baselines.planning.utils import KnownBounds
 
@@ -53,3 +53,49 @@ class MCTSConfig:
             self.depth_limit = math.ceil(
                 math.log(self.epsilon) / math.log(self.discount)
             )
+
+
+_DEFAULT_DRIVING_TYPE_IDS: Tuple[str, ...] = (
+    "Driving-v1/A0Shortestpath-v0",
+    "Driving-v1/A40Shortestpath-v0",
+    "Driving-v1/A60Shortestpath-v0",
+    "Driving-v1/A80Shortestpath-v0",
+    "Driving-v1/A100Shortestpath-v0",
+)
+
+
+@dataclass
+class EFEConfig(MCTSConfig):
+    """Configuration for the bach particle-EFE planner (EFEPlanner).
+
+    Extends MCTSConfig with five EFE-specific fields. Inherits all MCTSConfig
+    fields (discount, search_time_limit, c, truncated, action_selection, etc.).
+
+    Note: MCTSConfig.action_selection is ignored by EFEPlanner (always softmax);
+    MCTSConfig.c is unused (no UCB term). Both kept for forward compatibility
+    and harness uniformity.
+
+    See docs/superpowers/specs/2026-05-18-bach-skateboard-design.md §3 for the
+    rationale on field defaults (in particular K=32 per Miller-Madow bias).
+    """
+
+    gamma_precision: float = 4.0
+    efe_K: int = 32
+    min_visits_per_action: int = 2
+    partner_type_policy_ids: Tuple[str, ...] = _DEFAULT_DRIVING_TYPE_IDS
+    dirichlet_prior: float = 1.0
+
+    def __post_init__(self):
+        super().__post_init__()
+        if self.efe_K < 2:
+            raise ValueError(f"efe_K must be >= 2 (got {self.efe_K})")
+        if self.gamma_precision <= 0:
+            raise ValueError(
+                f"gamma_precision must be > 0 (got {self.gamma_precision})"
+            )
+        if self.dirichlet_prior <= 0:
+            raise ValueError(
+                f"dirichlet_prior must be > 0 (got {self.dirichlet_prior})"
+            )
+        if not self.partner_type_policy_ids:
+            raise ValueError("partner_type_policy_ids must be non-empty")
