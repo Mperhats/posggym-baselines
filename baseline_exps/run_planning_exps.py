@@ -55,7 +55,8 @@ import exp_utils
 import posggym
 import torch
 from exp_utils import PlanningExpParams
-from posggym_baselines.planning.config import MCTSConfig
+from posggym_baselines.planning.config import EFEConfig, MCTSConfig
+from posggym_baselines.planning.efe import EFEPlanner
 from posggym_baselines.planning.intmcp import INTMCP
 from posggym_baselines.planning.ipomcp import IPOMCP
 from posggym_baselines.planning.other_policy import OtherAgentMixturePolicy
@@ -83,6 +84,75 @@ def init_intmcp(model: posggym.POSGModel, exp_params: PlanningExpParams) -> INTM
         search_policies=None,  # Use RandomSearchPolicy
     )
     return planner
+
+
+def init_efe(model: posggym.POSGModel, exp_params: PlanningExpParams) -> EFEPlanner:
+    """Construct an EFEPlanner at the spec-default nesting level (depth=2).
+
+    Slots TypePartnerPolicy at the bottom of the chain, using the type set
+    from EFEConfig.partner_type_policy_ids (defaults to the 5-element
+    Driving-v1 Shortestpath registry).
+    """
+    planner = EFEPlanner.initialize(
+        model,
+        exp_params.agent_id,
+        config=exp_params.config,
+        nesting_level=exp_params.planner_kwargs["nesting_level"],
+        search_policies=None,  # Use RandomSearchPolicy
+    )
+    return planner
+
+
+def get_efe_exp_params(
+    args, env_data: exp_utils.EnvData, exp_name: str, exp_results_parent_dir: Path
+) -> List[PlanningExpParams]:
+    """Build EFE experiment param list mirroring get_intmcp_exp_params."""
+    config_kwargs = dict(exp_utils.DEFAULT_PLANNING_CONFIG_KWARGS_UCB)
+    config_kwargs["truncated"] = False
+
+    belief_stats_to_track = []
+    if args.track_belief_stats:
+        belief_stats_to_track = ["state", "history"]
+
+    all_exp_params = []
+    exp_num = 0
+    for planning_pop_id, test_pop_id, search_time in itertools.product(
+        ["P0", "P1"], ["P0", "P1"], args.search_times
+    ):
+        # The partner type set differs by P0 vs P1; pull from env_data.
+        partner_type_ids = (
+            env_data.agents_P1 if planning_pop_id == "P0" else env_data.agents_P0
+        )
+        exp_params = PlanningExpParams(
+            env_kwargs=env_data.env_kwargs,
+            agent_id=env_data.agent_id,
+            config=EFEConfig(
+                search_time_limit=search_time,
+                partner_type_policy_ids=tuple(partner_type_ids),
+                **config_kwargs,
+            ),
+            planner_init_fn=init_efe,
+            planner_kwargs={
+                "nesting_level": args.nesting_level,
+            },
+            test_other_agent_policy_ids=(
+                env_data.agents_P0 if test_pop_id == "P0" else env_data.agents_P1
+            ),
+            num_episodes=args.num_episodes,
+            exp_time_limit=args.exp_time_limit,
+            exp_name=exp_name,
+            exp_num=exp_num,
+            exp_results_parent_dir=exp_results_parent_dir,
+            planning_pop_id=planning_pop_id,
+            test_pop_id=test_pop_id,
+            full_env_id=env_data.full_env_id,
+            belief_stats_to_track=[*belief_stats_to_track],
+            track_per_step_belief_stats=args.track_per_step_belief_stats,
+        )
+        all_exp_params.append(exp_params)
+        exp_num += 1
+
+    return all_exp_params
 
 
 def get_intmcp_exp_params(
@@ -367,6 +437,10 @@ def main(args):
             exp_params = get_potmmcp_exp_params(
                 args, env_data, exp_name, exp_results_parent_dir
             )
+        elif alg_name == "EFE":
+            exp_params = get_efe_exp_params(
+                args, env_data, exp_name, exp_results_parent_dir
+            )
         else:
             raise ValueError(f"Unknown algorithm name: {alg_name}")
         all_exp_params.extend(exp_params)
@@ -394,7 +468,7 @@ if __name__ == "__main__":
         type=str,
         nargs="+",
         required=True,
-        choices=["INTMCP", "IPOMCP", "POMCP", "POTMMCP", "all"],
+        choices=["INTMCP", "IPOMCP", "POMCP", "POTMMCP", "EFE", "all"],
         help="Planning algorithm to run.",
     )
     parser.add_argument(
