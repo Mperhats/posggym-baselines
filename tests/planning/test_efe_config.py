@@ -10,7 +10,9 @@ from posggym_baselines.planning.config import EFEConfig
 def test_efe_config_defaults():
     cfg = EFEConfig(discount=0.95, search_time_limit=1.0, c=1.4, truncated=False)
     assert cfg.gamma_precision == 4.0
-    assert cfg.efe_K == 32
+    # Empirical default: K=8 wins on Driving-v1 (see config.py docstring).
+    # Stochastic envs (PE, LBF) should override to K=32 per Miller-Madow.
+    assert cfg.efe_K == 8
     assert cfg.min_visits_per_action == 2
     assert cfg.dirichlet_prior == 1.0
     assert cfg.partner_type_policy_ids == (
