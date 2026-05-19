@@ -451,14 +451,20 @@ class EFEPlanner:
             return 0, depth
 
         if len(obs_node.children) < len(self.action_spaces[self.agent_id]):
-            # lead node reached
+            # leaf node reached
             # some child action nodes may have been added by parent tree querying
             # so need to check if all actions have been added, and add if not
             for action in self.action_spaces[self.agent_id]:
                 if not obs_node.has_child(action):
                     obs_node.add_child(action)
+            # CHANGE 1 (cont.): _evaluate / _rollout return a discounted *return*
+            # (positive=good), inherited verbatim from intmcp.py. Our _simulate's
+            # caller accumulates this into ego_step_g which is G (negative=good).
+            # Sign flip here converts return -> G so the semantics line up.
+            # Without this flip, the planner backs up *positive* rewards as
+            # *bad* G estimates and actively avoids high-reward subtrees.
             leaf_node_value = self._evaluate(hps, depth, obs_node)
-            return leaf_node_value, depth
+            return -leaf_node_value, depth
 
         ego_action = self._search_action_selection(obs_node)
         joint_action = self._get_joint_action(hps, ego_action)
@@ -476,7 +482,13 @@ class EFEPlanner:
         )
         joint_obs = efe_estimate.sample_joint_obs
         ego_obs = joint_obs[self.agent_id]
-        ego_step_g = efe_estimate.g
+        # Apply config.info_gain_weight at the call site (keeps estimate_efe
+        # pure / unweighted). Default weight 1.0 = standard EFE; weight 0.0
+        # = pragmatic-only ablation (g = -utility).
+        ego_step_g = -(
+            efe_estimate.utility_hat
+            + self.config.info_gain_weight * efe_estimate.info_gain_hat
+        )
         ego_done = efe_estimate.sample_done
         next_state = efe_estimate.sample_next_state
 

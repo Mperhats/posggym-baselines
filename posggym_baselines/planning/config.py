@@ -84,6 +84,12 @@ class EFEConfig(MCTSConfig):
     min_visits_per_action: int = 2
     partner_type_policy_ids: Tuple[str, ...] = _DEFAULT_DRIVING_TYPE_IDS
     dirichlet_prior: float = 1.0
+    # Multiplier on info_gain_hat before adding to utility_hat in
+    # estimate_efe. Default 1.0 = standard EFE. Set to 0.0 for a
+    # pragmatic-only ablation (G = -utility, no epistemic value); useful
+    # both as a diagnostic and as a sweep axis for C3.4 (epistemic term
+    # contribution per END.md).
+    info_gain_weight: float = 1.0
 
     def __post_init__(self):
         super().__post_init__()
@@ -99,3 +105,7 @@ class EFEConfig(MCTSConfig):
             )
         if not self.partner_type_policy_ids:
             raise ValueError("partner_type_policy_ids must be non-empty")
+        if self.info_gain_weight < 0:
+            raise ValueError(
+                f"info_gain_weight must be >= 0 (got {self.info_gain_weight})"
+            )
