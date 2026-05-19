@@ -271,7 +271,7 @@ class EFEPlanner:
         if self.nesting_level > 0:
             nested_histories = self.get_nested_history_dist(history_dist)
             for i, pi in self.other_agent_policies.items():
-                pi._initial_nested_update(nested_histories[i])
+                pi._initial_nested_update(nested_histories.get(i, {}))
 
     def _nested_update(self, history_dist: Dict[AgentHistory, float], current_t: int):
         self._log_debug("Pruning unused nodes from tree")
@@ -299,7 +299,10 @@ class EFEPlanner:
         if self.nesting_level > 0:
             nested_histories = self.get_nested_history_dist(history_dist)
             for i, pi in self.other_agent_policies.items():
-                pi._nested_update(nested_histories[i], current_t)
+                # Defensive: get_nested_history_dist returns empty result when
+                # parent beliefs are empty (matched-step()-budget truncation).
+                # Recurse with empty dict in that case rather than KeyError.
+                pi._nested_update(nested_histories.get(i, {}), current_t)
 
     def _prune_traverse(
         self,
@@ -380,14 +383,33 @@ class EFEPlanner:
             self.nesting_level + 1
         )
         n_sims = 0
+        # Late-import to avoid circular import; StepBudgetExhausted lives in
+        # step_counter and isn't always relevant (wall-clock budgets don't
+        # raise it). If the wrapping model isn't StepBudgetModel, the except
+        # branch never triggers.
+        from posggym_baselines.planning.step_counter import StepBudgetExhausted
+        budget_exhausted = False
         for level in range(self.nesting_level + 1):
+            if budget_exhausted:
+                break
             self._log_info(f"Searching level {level=}")
             n_sims += self.step_statistics["num_sims"]
 
             level_start_time = time.time()
-            while time.time() - level_start_time < per_level_search_time_limit:
-                self._nested_sim(self.history, level, True)
-                n_sims += 1
+            try:
+                while (
+                    time.time() - level_start_time < per_level_search_time_limit
+                ):
+                    self._nested_sim(self.history, level, True)
+                    n_sims += 1
+            except StepBudgetExhausted:
+                # Matched-step() budget hit; bail out of all levels. The final
+                # action selection below will return the best action found so
+                # far from the partially-built root tree.
+                self._log_info(
+                    f"step budget exhausted at level={level}, n_sims={n_sims}"
+                )
+                budget_exhausted = True
 
         search_time = time.time() - start_time
         self.step_statistics["search_time"] = search_time
@@ -423,10 +445,16 @@ class EFEPlanner:
             self._log_debug(f"depleted {root.belief.size()=} {top_level=}")
             self._reinvigorate(
                 root,
-                root.parent.action,
+                root.parent.action if root.parent is not None else None,
                 root.obs,
                 target_node_size=self.config.extra_particles,
             )
+            # Bootstrap fix: if reinvigoration still left the belief empty
+            # (because the parent belief was also empty -- the matched-step()
+            # budget cascade), fall back to fresh initial-state sampling.
+            # Mirrors _initial_nested_update's particle-generation loop.
+            if root.belief.size() == 0:
+                self._bootstrap_belief(root, target_size=self.config.extra_particles)
 
         hps = root.belief.sample()
         if self.nesting_level > search_level:
@@ -438,6 +466,56 @@ class EFEPlanner:
             self.step_statistics["search_depth"] = max(
                 self.step_statistics["search_depth"], search_depth
             )
+
+    def _bootstrap_belief(self, obs_node: ObsNode, target_size: int) -> None:
+        """Populate an empty obs_node belief by sampling from model.sample_initial_state.
+
+        Fallback for the matched-step()-budget regime where reinvigoration's
+        parent-belief chain is also empty (depleted-node cascade). Samples
+        fresh initial states / observations / per-agent policy states and adds
+        target_size HistoryPolicyState particles, ignoring any obs-matching
+        constraint (since we have no way to obs-match without a parent belief).
+
+        This is a controlled "give up matching the actual history" fallback --
+        the planner will continue with particles drawn from the env's initial
+        distribution rather than crash.
+        """
+        init_actions = {i: None for i in self.model.possible_agents}
+        attempts = 0
+        max_attempts = target_size * 4  # safety cap
+        while obs_node.belief.size() < target_size and attempts < max_attempts:
+            attempts += 1
+            try:
+                state = self.model.sample_initial_state()
+                joint_obs = self.model.sample_initial_obs(state)
+                # Build a synthetic joint history from the freshly-sampled obs.
+                # This particle won't match the real history but lets the
+                # nested search continue.
+                joint_history = JointHistory.get_init_history(
+                    self.model.possible_agents, joint_obs
+                )
+                policy_state = {
+                    j: self.search_policies[j].get_initial_state()
+                    for j in self.model.possible_agents
+                    if j != self.agent_id
+                }
+                policy_state = self._update_other_agent_search_policies(
+                    init_actions, joint_obs, policy_state
+                )
+                obs_node.belief.add_particle(
+                    B.HistoryPolicyState(
+                        state, joint_history, policy_state, t=1,
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001
+                # Last-resort: if sampling fails, just stop and let the
+                # caller handle whatever sparse belief we have.
+                self._log_debug(f"bootstrap_belief failed: {exc}")
+                break
+        self._log_debug(
+            f"bootstrap_belief: filled {obs_node.belief.size()} particles "
+            f"in {attempts} attempts"
+        )
 
     def _simulate(
         self,
@@ -842,6 +920,19 @@ class EFEPlanner:
 
         parent_obs_node = obs_node.parent.parent
         assert parent_obs_node is not None
+
+        # Defensive: matched-step()-budget runs can truncate the search and
+        # leave parent beliefs empty. Skip reinvigoration in that case rather
+        # than crash on parent_belief.sample() inside _rejection_sample.
+        # The planner will continue with a depleted belief, and the next
+        # search loop's depleted-node handler will reinvigorate from the
+        # initial particle distribution.
+        if parent_obs_node.belief.size() == 0:
+            self._log_debug(
+                "Skipping _reinvigorate: parent belief is empty "
+                "(matched-step() budget truncation?)"
+            )
+            return
 
         self._reinvigorator.reinvigorate(
             self.agent_id,

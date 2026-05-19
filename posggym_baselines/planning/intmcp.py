@@ -273,7 +273,7 @@ class INTMCP:
         if self.nesting_level > 0:
             nested_histories = self.get_nested_history_dist(history_dist)
             for i, pi in self.other_agent_policies.items():
-                pi._initial_nested_update(nested_histories[i])
+                pi._initial_nested_update(nested_histories.get(i, {}))
 
     def _nested_update(self, history_dist: Dict[AgentHistory, float], current_t: int):
         self._log_debug("Pruning unused nodes from tree")
@@ -301,7 +301,8 @@ class INTMCP:
         if self.nesting_level > 0:
             nested_histories = self.get_nested_history_dist(history_dist)
             for i, pi in self.other_agent_policies.items():
-                pi._nested_update(nested_histories[i], current_t)
+                # Defensive (matched-step()-budget runs may truncate parent):
+                pi._nested_update(nested_histories.get(i, {}), current_t)
 
     def _prune_traverse(
         self,
@@ -382,14 +383,29 @@ class INTMCP:
             self.nesting_level + 1
         )
         n_sims = 0
+        # Handle StepBudgetExhausted (matched-step() benchmarks) by gracefully
+        # exiting the search loop with whatever tree was built so far.
+        # Wall-clock budgets never raise this.
+        from posggym_baselines.planning.step_counter import StepBudgetExhausted
+        budget_exhausted = False
         for level in range(self.nesting_level + 1):
+            if budget_exhausted:
+                break
             self._log_info(f"Searching level {level=}")
             n_sims += self.step_statistics["num_sims"]
 
             level_start_time = time.time()
-            while time.time() - level_start_time < per_level_search_time_limit:
-                self._nested_sim(self.history, level, True)
-                n_sims += 1
+            try:
+                while (
+                    time.time() - level_start_time < per_level_search_time_limit
+                ):
+                    self._nested_sim(self.history, level, True)
+                    n_sims += 1
+            except StepBudgetExhausted:
+                self._log_info(
+                    f"step budget exhausted at level={level}, n_sims={n_sims}"
+                )
+                budget_exhausted = True
 
         search_time = time.time() - start_time
         self.step_statistics["search_time"] = search_time
@@ -875,6 +891,17 @@ class INTMCP:
 
         parent_obs_node = obs_node.parent.parent
         assert parent_obs_node is not None
+
+        # Defensive: matched-step()-budget runs (via StepBudgetModel) can
+        # truncate search and leave parent beliefs empty. Skip reinvigoration
+        # rather than crash on parent_belief.sample(). The depleted-node
+        # handler in _nested_sim will reinvigorate from initial belief later.
+        if parent_obs_node.belief.size() == 0:
+            self._log_debug(
+                "Skipping _reinvigorate: parent belief is empty "
+                "(matched-step() budget truncation?)"
+            )
+            return
 
         self._reinvigorator.reinvigorate(
             self.agent_id,
