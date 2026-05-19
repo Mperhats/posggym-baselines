@@ -114,6 +114,21 @@ def test_sample_action_uses_mixture_distribution(two_type_partner):
     assert abs(counts[1] / 2000 - 0.55) < 0.03
 
 
+def test_reset_restores_uniform_prior(two_type_partner):
+    """After observed actions shift the posterior, reset() restores the prior."""
+    partner, _, _ = two_type_partner
+    prev_state = partner.sample_initial_state()
+    for _ in range(5):
+        partner.update_posterior(observed_partner_action=1, prev_state=prev_state)
+    # Posterior is now skewed toward B
+    posterior_before = partner._posterior()
+    assert posterior_before["type_B"] > 0.6
+    # Reset
+    partner.reset()
+    posterior_after = partner._posterior()
+    assert posterior_after == {"type_A": 0.5, "type_B": 0.5}
+
+
 def test_rejects_empty_type_set():
     with pytest.raises(ValueError, match="type_policy_ids must be non-empty"):
         TypePartnerPolicy(

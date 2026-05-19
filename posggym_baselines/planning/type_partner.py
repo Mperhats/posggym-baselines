@@ -57,8 +57,9 @@ class TypePartnerPolicy(OtherAgentPolicy):
             pid: posggym.agents.make(pid, model, agent_id)
             for pid in type_policy_ids
         }
+        self._dirichlet_prior = float(dirichlet_prior)
         self.dirichlet_alpha: Dict[str, float] = {
-            pid: dirichlet_prior for pid in type_policy_ids
+            pid: self._dirichlet_prior for pid in type_policy_ids
         }
 
     def sample_initial_state(self) -> PolicyState:
@@ -114,6 +115,15 @@ class TypePartnerPolicy(OtherAgentPolicy):
     def _posterior(self) -> Dict[str, float]:
         total = sum(self.dirichlet_alpha.values())
         return {pid: a / total for pid, a in self.dirichlet_alpha.items()}
+
+    def reset(self) -> None:
+        """Reset the Dirichlet posterior to its prior (per-episode reset).
+
+        Called by EFEPlanner.reset on each new episode so each episode starts
+        with a fresh uniform prior over types.
+        """
+        for pid in self.dirichlet_alpha:
+            self.dirichlet_alpha[pid] = self._dirichlet_prior
 
     def close(self) -> None:
         for p in self.policies.values():
